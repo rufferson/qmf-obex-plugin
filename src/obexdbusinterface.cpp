@@ -224,7 +224,7 @@ const QVariantList ObexDBusInterface::listMessages(const QString &account, const
             if(mask&Size)
                 item.insert("size", qmm.indicativeSize()*1024);
             if(mask&Text)
-                item.insert("text",qmm.hasBody()?"yes":"no");
+                item.insert("text",qmm.preview().length()>3?"yes":"no");
             if(mask&ReceptionStatus)
                 item.insert("reception_status",qmm.contentAvailable()?"complete":(qmm.partialContentAvailable()?"fractioned":"notification"));
             if(mask&AttachmentSize)
@@ -265,6 +265,8 @@ const QVariantMap ObexDBusInterface::getMessage(qint64 id) const
     QVariantMap ret;
     QMailMessageId mid((quint64)id);
     QMailMessage qmm = _store->message(mid);
+    QMailMessagePartContainer *ptc = qmm.findPlainTextContainer();
+    QMailMessagePartContainer *htc= qmm.findHtmlContainer();
     QMailFolder qmf;
     QMailAccount qma;
     if(!qmm.id().isValid()) {
@@ -302,6 +304,13 @@ const QVariantMap ObexDBusInterface::getMessage(qint64 id) const
     ret.insert("account",qma.name());
     ret.insert("length", qmm.body().length());
     ret.insert("body",qmm.body().data(QMailMessageBody::Decoded));
+    if(ptc) {
+        ret.insert("body",QString::fromUtf8(ptc->body().data(QMailMessageBody::Decoded)));
+    } else if(htc) {
+        ret.insert("body",QString::fromUtf8(htc->body().data(QMailMessageBody::Decoded)));
+    } else {
+        ret.insert("body", qmm.preview());
+    }
     return ret;
 }
 // sqlite3 uses signed 64-bit integers.
