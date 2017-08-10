@@ -43,6 +43,14 @@ static const char* msgType(QMailMessage::MessageType type)
         return "OTHER";
     }
 }
+static QMailMessage::MessageType msgType(const QString &type)
+{
+    if(type == "MMS") return QMailMessage::Mms;
+    if(type == "SMS_GSM") return QMailMessage::Sms;
+    if(type == "EMAIL") return QMailMessage::Email;
+    if(type == "IM") return QMailMessage::Instant;
+    return QMailMessage::AnyType;
+}
 
 void ObexDBusInterface::notifyMessages(const QMailMessageIdList &ids, MAPEventType type)
 {
@@ -322,15 +330,16 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
     QMailAccountIdList mal;
     QMailFolderIdList fil;
     QMailFolderId fid;
-    QMailMessageBody body = QMailMessageBody::fromData(data.value("body").toString(),QMailMessageContentType("text/plain"),QMailMessageBody::EightBit);
+    QMailMessageContentType type = QMailMessageContentType("text/plain; charset=UTF-8");
+    QMailMessageBody body = QMailMessageBody::fromData(data.value("body").toString(),type,QMailMessageBody::EightBit);
 
     qmm->setBody(body);
     qmm->setSubject(data.value("subject").toString());
-    qmm->setTo(QMailAddress(data.value("to").toString()));
     qmm->setDate(QMailTimeStamp(data.value("datetime",QDateTime::currentDateTimeUtc()).toDateTime()));
     qmm->setStatus(QMailMessage::Outbox | QMailMessage::Draft, true);
     qmm->setStatus(QMailMessage::Outgoing, true);
     qmm->setStatus(QMailMessage::ContentAvailable, true);
+    qmm->setMessageType(msgType(data.value("type","EMAIL").toString()));
     // TODO: more fields
     if(data.contains("account")) {
         mal = _store->queryAccounts(QMailAccountKey::name(data.value("account").toString()));
@@ -344,6 +353,8 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
         return -1;
     }
     qmm->setParentAccountId(mal.at(0));
+    qmm->setFrom(QMailAddress(data.value("from",_store->account(mal.at(0)).fromAddress().toString()).toString()));
+    qmm->setTo(QMailAddress(data.value("to",qmm->from().toString()).toString()));
     fil = _store->queryFolders(QMailFolderKey::path(data.value("folder","outbox").toString()) & QMailFolderKey::parentAccountId(mal.at(0)));
     if(fil.isEmpty()) {
         fid = _store->account(mal.at(0)).standardFolder(QMailFolder::OutboxFolder);
@@ -366,6 +377,7 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
     }
     qmi = qmm->id();
     _queue.removeAll(qmm);
+    qDebug() << "Final message to submit: " << qmm->toRfc2822();
     delete qmm;
     // Now transmit the message
     mta = new QMailTransmitAction(this);
