@@ -4,6 +4,7 @@
 #include <QtDBus/QDBusMetaType>
 
 #include <qmailstore.h>
+#include <qmaildisconnected.h>
 #include <qmailserviceaction.h>
 
 #include <QDebug>
@@ -135,6 +136,7 @@ const QVariantList ObexDBusInterface::listFolders(const QString &account, const 
             item.insert("name",qmf.displayName());
             item.insert("count", qmf.serverCount());
             item.insert("unread",qmf.serverUnreadCount());
+            item.insert("account",_store->account(qmf.parentAccountId()).name());
             ret.append(item);
         }
     }
@@ -145,27 +147,34 @@ const QVariantList ObexDBusInterface::listMessages(const QString &account, const
 {
     QVariantList ret;
     QMailMessageKey mmk;
-    QMailMessageSortKey msk;
-    QMailFolderIdList fil = _store->queryFolders(QMailFolderKey::path(folder));
-    QMailMessageId qmi;
+    QMailMessageSortKey msk = QMailMessageSortKey::timeStamp(Qt::DescendingOrder) & QMailMessageSortKey::receptionTimeStamp(Qt::DescendingOrder);
+    QMailFolderKey mfk;
+    QMailFolderIdList fil;
+    QMailAccountIdList mal;
     QMailMessageIdList qml;
+    QMailMessageId qmi;
+
     if(folder.isEmpty()) {
         qDebug() << "Cannot list messages at root. Did you mean INBOX?";
         return ret;
     }
-    if(fil.isEmpty()) {
-        qDebug() << "Nof folder " << folder << " found.";
-        return ret;
-    }
-    mmk = QMailMessageKey::parentFolderId(fil.at(0));
     if(!account.isEmpty()) {
-        QMailAccountIdList mal = _store->queryAccounts(QMailAccountKey::name(account, QMailDataComparator::Includes));
+        mal = _store->queryAccounts(QMailAccountKey::name(account));
         if(mal.isEmpty()) {
             qDebug() << "No account containing " << account << " found";
             return ret;
         }
-        mmk &= QMailMessageKey::parentAccountId(mal);
+    } else
+        mal = _store->queryAccounts();
+    mfk = QMailFolderKey::parentAccountId(mal);
+    fil = _store->queryFolders(mfk & QMailFolderKey::path(folder));
+    if(fil.isEmpty() && folder.toLower() == "deleted")
+        fil = _store->queryFolders(mfk & QMailFolderKey::path("trash"));
+    if(fil.isEmpty()) {
+        qDebug() << "No folder " << folder << " found.";
+        return ret;
     }
+    mmk = QMailMessageKey::parentAccountId(mal) & QMailMessageKey::parentFolderId(fil);
     qDebug() << "Listing " << max << " messages in " << folder << " from " << offset << " found folders: " << fil.length();
     if(filter.values().length()) {
         if(filter.value("type").toInt()>0)
@@ -190,25 +199,61 @@ const QVariantList ObexDBusInterface::listMessages(const QString &account, const
         ret.append(cnt);
     } else {
         qml = _store->queryMessages(mmk,msk,max,offset);
+        quint32 mask = filter.value("mask",(Subject | DateTime | RecipientAddressing | Type | Size | ReceptionStatus | AttachmentSize | ConversationId | Direction)).toULongLong();
         foreach (qmi, qml) {
             QVariantMap item;
             QMailMessage qmm = _store->message(qmi);
+            item.insert("account", _store->account(qmm.parentAccountId()).name());
             item.insert("id",qmi.toULongLong());
-            item.insert("type",msgType(qmm.messageType()));
-            item.insert("subject",qmm.subject());
-            item.insert("datetime",qmm.date().toString());
-            item.insert("sender_name",qmm.from().name());
-            item.insert("sender_addressing",qmm.from().address());
-            item.insert("replyto_addressing",qmm.replyTo().address());
-            item.insert("recipient_name",qmm.recipients().at(0).name());
-            item.insert("recipient_addressing",qmm.recipients().at(0).address());
-            item.insert("size", qmm.indicativeSize());
-            item.insert("text",qmm.hasBody()?"yes":"no");
-            item.insert("reception_status",qmm.contentAvailable()?"complete":(qmm.partialContentAvailable()?"fractioned":"notification"));
-            item.insert("attachment_size",qmm.hasAttachments()?qmm.size():0);
-            item.insert("priority",(qmm.status()&QMailMessage::HighPriority)?"yes":"no");
-            item.insert("sent", (qmm.status()&QMailMessage::Sent)?"yes":"mo");
-            item.insert("read", (qmm.status()&QMailMessage::Read)?"yes":"no");
+            if(mask & Subject)
+                item.insert("subject",qmm.subject());
+            if(mask & DateTime)
+                item.insert("datetime",qmm.date().toString());
+            if(mask&SenderName)
+                item.insert("sender_name",qmm.from().name());
+            if(mask&SenderAddressing)
+                item.insert("sender_addressing",qmm.from().address());
+            if(mask&ReplyToAddressing)
+                item.insert("replyto_addressing",qmm.replyTo().address());
+            if(mask&RecipientName)
+                item.insert("recipient_name",qmm.recipients().isEmpty()? "": qmm.recipients().at(0).name());
+            if(mask&RecipientAddressing)
+                item.insert("recipient_addressing",qmm.recipients().isEmpty()? "": qmm.recipients().at(0).address());
+            if(mask&Type)
+                item.insert("type",msgType(qmm.messageType()));
+            if(mask&Size)
+                item.insert("size", qmm.indicativeSize()*1024);
+            if(mask&Text)
+                item.insert("text",qmm.hasBody()?"yes":"no");
+            if(mask&ReceptionStatus)
+                item.insert("reception_status",qmm.contentAvailable()?"complete":(qmm.partialContentAvailable()?"fractioned":"notification"));
+            if(mask&AttachmentSize)
+                item.insert("attachment_size",qmm.hasAttachments()?qmm.size():0);
+            if(mask&Priority)
+                item.insert("priority", (qmm.status()&QMailMessage::HighPriority)?"yes":"no");
+            if(mask&Read)
+                item.insert("read",     (qmm.status()&QMailMessage::Read)        ?"yes":"no");
+            if(mask&Sent)
+                item.insert("sent",     (qmm.status()&QMailMessage::Sent)        ?"yes":"no");
+            if(mask&Protected)
+                item.insert("protected",QString("no"));
+            if(mask&DeliveryStatus)
+                item.insert("delivery_status", qmm.status()&QMailMessage::Sent ? "sent":"unknown");
+            if(mask&ConversationId)
+                item.insert("conversation_id",qmm.parentThreadId().toULongLong());
+            if(mask&ConversationName)
+                item.insert("conversation_name", _store->thread(qmm.parentThreadId()).subject());
+            if(mask&Direction)
+                item.insert("direction", (qmm.status()&QMailMessage::Outgoing)?"outgoing":"incoming");
+            if(mask&AttachmentMime) {
+                QList<QMailMessagePartContainer::Location> pll = qmm.findAttachmentLocations();
+                QMailMessagePartContainer::Location pli;
+                QStringList mpl;
+                foreach (pli, pll) {
+                    mpl.append(qmm.partAt(pli).contentType().toString(false,false));
+                }
+                item.insert("attachment_mime_types",mpl.join(","));
+            }
             ret.append(item);
         }
     }
@@ -267,20 +312,23 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
     QMailMessage *qmm = new QMailMessage();
     QMailAccountIdList mal;
     QMailFolderIdList fil;
+    QMailFolderId fid;
     QMailMessageBody body = QMailMessageBody::fromData(data.value("body").toString(),QMailMessageContentType("text/plain"),QMailMessageBody::EightBit);
 
     qmm->setBody(body);
     qmm->setSubject(data.value("subject").toString());
     qmm->setTo(QMailAddress(data.value("to").toString()));
-    qmm->setDate(QMailTimeStamp(data.value("datetime").toDateTime()));
+    qmm->setDate(QMailTimeStamp(data.value("datetime",QDateTime::currentDateTimeUtc()).toDateTime()));
     qmm->setStatus(QMailMessage::Outbox | QMailMessage::Draft, true);
     qmm->setStatus(QMailMessage::Outgoing, true);
     qmm->setStatus(QMailMessage::ContentAvailable, true);
     // TODO: more fields
     if(data.contains("account")) {
         mal = _store->queryAccounts(QMailAccountKey::name(data.value("account").toString()));
-    } else {
+    } else if(data.contains("from")) {
         mal = _store->queryAccounts(QMailAccountKey::fromAddress(data.value("from").toString()));
+    } else {
+        mal = _store->queryAccounts(QMailAccountKey::status(QMailAccount::PreferredSender));
     }
     if(mal.isEmpty()) {
         qDebug() << "Cannot identify mail account neither from " << data.value("account") << " nor from " << data.value("from");
@@ -289,10 +337,16 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
     qmm->setParentAccountId(mal.at(0));
     fil = _store->queryFolders(QMailFolderKey::path(data.value("folder","outbox").toString()) & QMailFolderKey::parentAccountId(mal.at(0)));
     if(fil.isEmpty()) {
+        fid = _store->account(mal.at(0)).standardFolder(QMailFolder::OutboxFolder);
+        if(!fid.isValid())
+            fid = _store->account(mal.at(0)).standardFolder(QMailFolder::DraftsFolder);
+    } else
+        fid = fil.at(0);
+    if(!fid.isValid()) {
         qDebug() << "Cannot find folder for account ID " << mal.at(0).toULongLong() << " " << data.value("folder");
         return -2;
     }
-    qmm->setParentFolderId(fil.at(0));
+    qmm->setParentFolderId(fid);
     // Store to outbox
     _queue.append(qmm);
     if(!_store->addMessage(qmm)) {
@@ -323,48 +377,45 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
 int ObexDBusInterface::setMessage(qint64 id, quint8 indicator, bool value)
 {
     int ret = 0;
-    QMailMessage qmm = _store->message(QMailMessageId(id));
-    QMailStorageAction *msa;
-    if(!qmm.id().isValid()) {
+    QMailMessageMetaData mmd = _store->messageMetaData(QMailMessageId(id));
+    if(!mmd.id().isValid()) {
         qDebug() << "Cannot find message with ID " << id;
         return -1;
     }
-    msa = new QMailStorageAction(this);
-    connect(msa, &QMailStorageAction::activityChanged, [=](QMailStorageAction::Activity a) {
-        if(a == QMailRetrievalAction::Successful || a == QMailRetrievalAction::Failed) {
-            msa->deleteLater();
-            qDebug() << "Removal complete " << ((a==QMailRetrievalAction::Successful)?"successfully":"with error");
-            if(a == QMailStorageAction::Successful) {
-                QMailRetrievalAction *mra = new QMailRetrievalAction(this);
-                connect(mra,&QMailRetrievalAction::activityChanged, [=](QMailRetrievalAction::Activity a){
-                    if(a == QMailRetrievalAction::Successful || a == QMailRetrievalAction::Failed) {
-                        mra->deleteLater();
-                        qDebug() << "Symc complete " << ((a==QMailRetrievalAction::Successful)?"successfully":"with error");
-                    }
-                });
-                mra->exportUpdates(qmm.parentAccountId());
-            }
-        }
-    });
     if(indicator == 0) {
-        qmm.setStatus(QMailMessage::Read, value);
-        msa->updateMessages(QMailMessageList() << qmm);
+        qDebug() << "Setting Read state to " << value;
+        if(!_store->updateMessagesMetaData(QMailMessageKey::id(mmd.id()), QMailMessage::Read, value)) {
+            qDebug() << "Message state change failed in local storage";
+            return -4;
+        }
+
     } else if(indicator == 1) {
-        if(value && qmm.status()&QMailMessage::Removed) {
+        qDebug() << "Removal action: " << value;
+        if(value && mmd.status()&QMailMessage::Removed) {
             // irreversible delete of deleted
-            msa->deleteMessages(QMailMessageIdList() << qmm.id());
+            if(_store->removeMessages(QMailMessageKey::id(mmd.id()), QMailStore::CreateRemovalRecord)) {
+                qDebug() << "Message removal failed in local storage";
+                return -3;
+            }
         } else if(value) {
             // reversible recyle bin removal
-            msa->moveToStandardFolder(QMailMessageIdList() << qmm.id(), QMailFolder::TrashFolder);
+            QMailDisconnected::moveToStandardFolder(QMailMessageIdList() << mmd.id(), QMailFolder::TrashFolder);
         } else {
             // undelete
-            msa->restoreToPreviousFolder(QMailMessageKey::id(qmm.id()));
+            QMailDisconnected::restoreToPreviousFolder(QMailMessageKey::id(mmd.id()));
         }
     } else {
         qDebug() << "Unsupported indicator value " << indicator;
-        delete msa;
         return -2;
     }
+    QMailRetrievalAction *mra = new QMailRetrievalAction(this);
+    connect(mra,&QMailRetrievalAction::activityChanged, [=](QMailRetrievalAction::Activity a){
+        if(a == QMailRetrievalAction::Successful || a == QMailRetrievalAction::Failed) {
+            mra->deleteLater();
+            qDebug() << "Remote Sync complete " << ((a==QMailRetrievalAction::Successful)?"successfully":"with error");
+        }
+    });
+    mra->exportUpdates(mmd.parentAccountId());
     return ret;
 }
 
@@ -387,7 +438,7 @@ int ObexDBusInterface::messageUpdate(const QString &account, const QString &fold
         connect(sync, &QMailRetrievalAction::activityChanged, [=](QMailServiceAction::Activity a){
             if(a == QMailServiceAction::Successful || a == QMailSearchAction::Failed) {
                 sync->deleteLater();
-                qDebug() << "Update complete";
+                qDebug() << "Update complete: " << a << "/" << sync->status().errorCode << ":" << sync->status().text;
             }
         });
         qDebug() << "Requesting update for folder " << fil << " at " << mai.toULongLong();

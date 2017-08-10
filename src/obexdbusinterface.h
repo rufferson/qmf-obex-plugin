@@ -30,6 +30,31 @@ public:
         MessageShifted,
         ReadStatusChanged
     };
+    enum FilterParamMask {
+        Subject          = 0x000001,    // 0
+        DateTime         = 0x000002,    // 1
+        SenderName       = 0x000004,    // 2
+        SenderAddressing = 0x000008,    // 3
+        RecipientName    = 0x000010,    // 4
+        RecipientAddressing = 0x000020, // 5
+        Type             = 0x000040,    // 6
+        Size             = 0x000080,    // 7
+        ReceptionStatus  = 0x000100,    // 8
+        Text             = 0x000200,    // 9
+        AttachmentSize   = 0x000400,    // 10
+        Priority         = 0x000800,    // 11
+        Read             = 0x001000,    // 12
+        Sent             = 0x002000,    // 13
+        Protected        = 0x004000,    // 14
+        ReplyToAddressing= 0x008000,    // 15
+        DeliveryStatus   = 0x010000,    // 16
+        ConversationId   = 0x020000,    // 17
+        ConversationName = 0x040000,    // 18
+        Direction        = 0x080000,    // 19
+        AttachmentMime   = 0x100000,    // 20
+        Reserved         = 0x200000     // 21-31
+    };
+    Q_DECLARE_FLAGS(MaskParams, FilterParamMask)
 
 public slots:
     Q_SCRIPTABLE const QVariantList listAccounts() const;
