@@ -14,7 +14,9 @@ const QString ObexDBusInterface::dbusPath = "/org/sailfish/qmf/obex";
 
 ObexDBusInterface::ObexDBusInterface(QObject *parent) : QObject(parent)
 {
+    int mt = qDBusRegisterMetaType< QList<qint64> >();
     QDBusConnection dbusSession(QDBusConnection::sessionBus());
+    qDebug() << "Registered type under " << mt;
 
     dbusSession.registerService(dbusService);
     dbusSession.registerObject(dbusPath, this,
@@ -151,26 +153,18 @@ const QVariantList ObexDBusInterface::listFolders(const QString &account, const 
     return ret;
 }
 
-const QVariantList ObexDBusInterface::listMessages(const QString &account, const QString &folder, quint16 max, quint16 offset, const QVariantMap &filter) const
+const QMailMessageKey ObexDBusInterface::prepareMessagesFilter(const QString &account, const QString &folder, const QVariantMap &filter) const
 {
-    QVariantList ret;
     QMailMessageKey mmk;
-    QMailMessageSortKey msk = QMailMessageSortKey::timeStamp(Qt::DescendingOrder) & QMailMessageSortKey::receptionTimeStamp(Qt::DescendingOrder);
     QMailFolderKey mfk;
     QMailFolderIdList fil;
     QMailAccountIdList mal;
-    QMailMessageIdList qml;
-    QMailMessageId qmi;
 
-    if(folder.isEmpty()) {
-        qDebug() << "Cannot list messages at root. Did you mean INBOX?";
-        return ret;
-    }
     if(!account.isEmpty()) {
         mal = _store->queryAccounts(QMailAccountKey::name(account));
         if(mal.isEmpty()) {
             qDebug() << "No account containing " << account << " found";
-            return ret;
+            return mmk;
         }
     } else
         mal = _store->queryAccounts();
@@ -179,11 +173,15 @@ const QVariantList ObexDBusInterface::listMessages(const QString &account, const
     if(fil.isEmpty() && folder.toLower() == "deleted")
         fil = _store->queryFolders(mfk & QMailFolderKey::path("trash"));
     if(fil.isEmpty()) {
-        qDebug() << "No folder " << folder << " found.";
-        return ret;
-    }
-    mmk = QMailMessageKey::parentAccountId(mal) & QMailMessageKey::parentFolderId(fil);
-    qDebug() << "Listing " << max << " messages in " << folder << " from " << offset << " found folders: " << fil.length();
+        if(folder.toLower() == "outbox") {
+            mmk = QMailMessageKey::parentAccountId(mal) & QMailMessageKey::status(QMailMessage::Outbox);
+        } else {
+            qDebug() << "No folder " << folder << " found.";
+            return mmk;
+        }
+    } else
+        mmk = QMailMessageKey::parentAccountId(mal) & QMailMessageKey::parentFolderId(fil);
+
     if(filter.values().length()) {
         if(filter.value("type").toInt()>0)
             mmk &= QMailMessageKey::messageType(filter.value("type").toInt(),QMailDataComparator::Excludes);
@@ -202,73 +200,113 @@ const QVariantList ObexDBusInterface::listMessages(const QString &account, const
         if(!filter.value("rcpt").toString().isEmpty())
             mmk &= QMailMessageKey::recipients(filter.value("rcpt").toString(),QMailDataComparator::Includes);
     }
+    return mmk;
+}
+
+const QVariantMap ObexDBusInterface::getMetadata(qint64 id, quint32 mask) const
+{
+    QVariantMap item;
+    QMailMessage qmm;
+    QMailMessageMetaData qmd, *ptr;
+
+    if(!mask) // Set required fields only for empty mask
+        mask = Subject | DateTime | RecipientAddressing | Type | Size | ReceptionStatus | AttachmentSize | ConversationId | Direction;
+
+    if(mask & (ReplyToAddressing|AttachmentMime)) {
+        // This is goddamn slow, obex client times out for default batch of 1000 so be sure to reduce the batch
+        qmm = _store->message(QMailMessageId(id));
+        ptr = &qmm;
+    } else {
+        qmd = _store->messageMetaData(QMailMessageId(id));
+        ptr = &qmd;
+    }
+
+    item.insert("account", _store->account(qmm.parentAccountId()).name());
+    item.insert("id", id);
+
+    if(mask & Subject)
+        item.insert("subject",ptr->subject());
+    if(mask & DateTime)
+        item.insert("datetime",ptr->date().toString(QMailTimeStamp::Rfc3339));
+    if(mask&SenderName)
+        item.insert("sender_name",ptr->from().name());
+    if(mask&SenderAddressing)
+        item.insert("sender_addressing",ptr->from().address());
+    if(mask&ReplyToAddressing)
+        item.insert("replyto_addressing",((QMailMessage*)(ptr))->replyTo().address());
+    if(mask&RecipientName)
+        item.insert("recipient_name",ptr->recipients().isEmpty()? "": ptr->recipients().at(0).name());
+    if(mask&RecipientAddressing)
+        item.insert("recipient_addressing",ptr->recipients().isEmpty()? "": ptr->recipients().at(0).address());
+    if(mask&Type)
+        item.insert("type",msgType(ptr->messageType()));
+    if(mask&Size)
+        item.insert("size", QString::number(ptr->indicativeSize()*1024));
+    if(mask&Text)
+        item.insert("text",ptr->preview().length()>3?"yes":"no");
+    if(mask&ReceptionStatus)
+        item.insert("reception_status",ptr->contentAvailable()?"complete":(ptr->partialContentAvailable()?"fractioned":"notification"));
+    if(mask&AttachmentSize)
+        item.insert("attachment_size",QString::number((ptr->status()&QMailMessage::HasAttachments)?ptr->size():0));
+    if(mask&Priority)
+        item.insert("priority", (ptr->status()&QMailMessage::HighPriority)?"yes":"no");
+    if(mask&Read)
+        item.insert("read",     (ptr->status()&QMailMessage::Read)        ?"yes":"no");
+    if(mask&Sent)
+        item.insert("sent",     (ptr->status()&QMailMessage::Sent)        ?"yes":"no");
+    if(mask&Protected)
+        item.insert("protected",QString("no"));
+    if(mask&DeliveryStatus)
+        item.insert("delivery_status", ptr->status()&QMailMessage::Sent ? "sent":"unknown");
+    if(mask&ConversationId)
+        item.insert("conversation_id",ptr->parentThreadId().toULongLong());
+    if(mask&ConversationName)
+        item.insert("conversation_name", _store->thread(ptr->parentThreadId()).subject());
+    if(mask&Direction)
+        item.insert("direction", (ptr->status()&QMailMessage::Outgoing)?"outgoing":"incoming");
+    if(mask&AttachmentMime) {
+        QList<QMailMessagePartContainer::Location> pll = ((QMailMessage*)(ptr))->findAttachmentLocations();
+        QMailMessagePartContainer::Location pli;
+        QStringList mpl;
+        foreach (pli, pll) {
+            mpl.append(((QMailMessage*)(ptr))->partAt(pli).contentType().toString(false,false));
+        }
+        item.insert("attachment_mime_types",mpl.join(","));
+    }
+
+    return item;
+}
+
+const QList<qint64> ObexDBusInterface::listMessages(const QString &account, const QString &folder, quint16 max, quint16 offset, const QVariantMap &filter) const
+{
+    QList<qint64> ret;
+    QMailMessageKey mmk;
+    QMailMessageIdList qml;
+
+    if(folder.isEmpty()) {
+        qDebug() << "Cannot list messages at root. Did you mean INBOX?";
+        return ret;
+    }
+    mmk = prepareMessagesFilter(account, folder, filter);
+    if(mmk.isEmpty()) {
+        qDebug() << "Could not prepare filter for message query";
+        return ret;
+    }
+    qDebug() << "Listing " << max << " messages in " << folder << " from " << offset << " for account " << account;
     if(max == 0) {
         int cnt = _store->countMessages(mmk);
         ret.append(cnt);
     } else {
+        QMailMessageSortKey msk = QMailMessageSortKey::timeStamp(Qt::DescendingOrder) & QMailMessageSortKey::receptionTimeStamp(Qt::DescendingOrder);
         qml = _store->queryMessages(mmk,msk,max,offset);
-        quint32 mask = filter.value("mask",(Subject | DateTime | RecipientAddressing | Type | Size | ReceptionStatus | AttachmentSize | ConversationId | Direction)).toULongLong();
-        foreach (qmi, qml) {
-            QVariantMap item;
-            QMailMessage qmm = _store->message(qmi);
-            item.insert("account", _store->account(qmm.parentAccountId()).name());
-            item.insert("id",qmi.toULongLong());
-            if(mask & Subject)
-                item.insert("subject",qmm.subject());
-            if(mask & DateTime)
-                item.insert("datetime",qmm.date().toString());
-            if(mask&SenderName)
-                item.insert("sender_name",qmm.from().name());
-            if(mask&SenderAddressing)
-                item.insert("sender_addressing",qmm.from().address());
-            if(mask&ReplyToAddressing)
-                item.insert("replyto_addressing",qmm.replyTo().address());
-            if(mask&RecipientName)
-                item.insert("recipient_name",qmm.recipients().isEmpty()? "": qmm.recipients().at(0).name());
-            if(mask&RecipientAddressing)
-                item.insert("recipient_addressing",qmm.recipients().isEmpty()? "": qmm.recipients().at(0).address());
-            if(mask&Type)
-                item.insert("type",msgType(qmm.messageType()));
-            if(mask&Size)
-                item.insert("size", qmm.indicativeSize()*1024);
-            if(mask&Text)
-                item.insert("text",qmm.preview().length()>3?"yes":"no");
-            if(mask&ReceptionStatus)
-                item.insert("reception_status",qmm.contentAvailable()?"complete":(qmm.partialContentAvailable()?"fractioned":"notification"));
-            if(mask&AttachmentSize)
-                item.insert("attachment_size",qmm.hasAttachments()?qmm.size():0);
-            if(mask&Priority)
-                item.insert("priority", (qmm.status()&QMailMessage::HighPriority)?"yes":"no");
-            if(mask&Read)
-                item.insert("read",     (qmm.status()&QMailMessage::Read)        ?"yes":"no");
-            if(mask&Sent)
-                item.insert("sent",     (qmm.status()&QMailMessage::Sent)        ?"yes":"no");
-            if(mask&Protected)
-                item.insert("protected",QString("no"));
-            if(mask&DeliveryStatus)
-                item.insert("delivery_status", qmm.status()&QMailMessage::Sent ? "sent":"unknown");
-            if(mask&ConversationId)
-                item.insert("conversation_id",qmm.parentThreadId().toULongLong());
-            if(mask&ConversationName)
-                item.insert("conversation_name", _store->thread(qmm.parentThreadId()).subject());
-            if(mask&Direction)
-                item.insert("direction", (qmm.status()&QMailMessage::Outgoing)?"outgoing":"incoming");
-            if(mask&AttachmentMime) {
-                QList<QMailMessagePartContainer::Location> pll = qmm.findAttachmentLocations();
-                QMailMessagePartContainer::Location pli;
-                QStringList mpl;
-                foreach (pli, pll) {
-                    mpl.append(qmm.partAt(pli).contentType().toString(false,false));
-                }
-                item.insert("attachment_mime_types",mpl.join(","));
-            }
-            ret.append(item);
-        }
+        qDebug() << "Returning " << qml.length() << " entries";
+        for(int i=0; i<qml.length(); i++)
+            ret.append(qml.at(i).toULongLong());
     }
     return ret;
 }
 
-const QVariantMap ObexDBusInterface::getMessage(qint64 id) const
+const QVariantMap ObexDBusInterface::getMessage(qint64 id, quint32 flags) const
 {
     QVariantMap ret;
     QMailMessageId mid((quint64)id);
@@ -281,7 +319,7 @@ const QVariantMap ObexDBusInterface::getMessage(qint64 id) const
         qDebug() << "No such message with id " << id;
         return ret;
     }
-    qDebug() << "Fetching message " << mid.toULongLong();
+    qDebug() << "Fetching message " << mid.toULongLong() << " with flags " << flags;
     qmf = _store->folder(qmm.parentFolderId());
     qma = _store->account(qmm.parentAccountId());
     ret.insert("date",qmm.date().toString());
@@ -322,7 +360,7 @@ const QVariantMap ObexDBusInterface::getMessage(qint64 id) const
     return ret;
 }
 // sqlite3 uses signed 64-bit integers.
-qint64 ObexDBusInterface::putMessage(const QVariantMap data)
+qint64 ObexDBusInterface::putMessage(const QVariantMap data, quint32 flags)
 {
     QMailMessageId qmi;
     QMailTransmitAction *mta;
@@ -333,6 +371,9 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data)
     QMailMessageContentType type = QMailMessageContentType("text/plain; charset=UTF-8");
     QMailMessageBody body = QMailMessageBody::fromData(data.value("body").toString(),type,QMailMessageBody::EightBit);
 
+    Q_UNUSED(flags);
+    // FIXME: bMessage contains entire rfc2822 message though, shouldn't we rather do
+    //*qmm = QMailMessage::fromRfc2822(data.value("body").toString().toUtf8());
     qmm->setBody(body);
     qmm->setSubject(data.value("subject").toString());
     qmm->setDate(QMailTimeStamp(data.value("datetime",QDateTime::currentDateTimeUtc()).toDateTime()));
