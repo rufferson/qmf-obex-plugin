@@ -153,6 +153,21 @@ const QVariantList ObexDBusInterface::listFolders(const QString &account, const 
     return ret;
 }
 
+/* -- OBEX Types
+ * 000xxxx1 0x01 SMS_GSM
+ * 000xxx1x 0x02 SMS_CDMA
+ * 000xx1xx 0x04 EMAIL
+ * 000x1xxx 0x08 MMS
+ * 0001xxxx 0x10 IM
+ *  -- QMF Types
+ * 00xxxxx1 0x01 MMS
+ * 00xxxx1x 0x02 EMS
+ * 00xxx1xx 0x04 SMS
+ * 00xx1xxx 0x08 EMAIL
+ * 00x1xxxx 0x10 SYSTEM
+ * 001xxxxx 0x20 IM
+ */
+#define TYPE_MAP2QMF(x) (((x & 0x10) << 1) | ((x & 0x4) << 1) | ((x & 0x1) <<2) | ((x & 0x8) >> 3))
 const QMailMessageKey ObexDBusInterface::prepareMessagesFilter(const QString &account, const QString &folder, const QVariantMap &filter) const
 {
     QMailMessageKey mmk;
@@ -184,7 +199,7 @@ const QMailMessageKey ObexDBusInterface::prepareMessagesFilter(const QString &ac
 
     if(filter.values().length()) {
         if(filter.value("type").toInt()>0)
-            mmk &= QMailMessageKey::messageType(filter.value("type").toInt(),QMailDataComparator::Excludes);
+            mmk &= QMailMessageKey::messageType(TYPE_MAP2QMF(filter.value("type").toInt()),QMailDataComparator::Excludes);
         if(filter.value("read").toInt()>0)
             mmk &= QMailMessageKey::status(QMailMessage::Read,
                             (filter.value("read").toInt()==1) ? QMailDataComparator::Excludes : QMailDataComparator::Includes);
@@ -227,7 +242,7 @@ const QVariantMap ObexDBusInterface::getMetadata(qint64 id, quint32 mask) const
     if(mask & Subject)
         item.insert("subject",ptr->subject());
     if(mask & DateTime)
-        item.insert("datetime",ptr->date().toString(QMailTimeStamp::Rfc3339));
+        item.insert("datetime",ptr->date().toUTC().toString(Qt::ISODate).remove(QChar('-')).remove(QChar(':')));
     if(mask&SenderName)
         item.insert("sender_name",ptr->from().name());
     if(mask&SenderAddressing)
