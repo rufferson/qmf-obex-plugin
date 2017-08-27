@@ -53,6 +53,31 @@ static QMailMessage::MessageType msgType(const QString &type)
     if(type == "IM") return QMailMessage::Instant;
     return QMailMessage::AnyType;
 }
+static const QString flag2path(const QMailFolder &qmf)
+{
+    if(qmf.status()&QMailFolder::Trash)
+        return "deleted";
+    if(qmf.status()&QMailFolder::Drafts)
+        return "drafts";
+    if(qmf.status()&QMailFolder::Sent)
+        return "sent";
+    if(qmf.status()&QMailFolder::Junk)
+        return "junk";
+    return qmf.path();
+}
+static const QMailFolderKey path2key(const QString folder)
+{
+    if(folder.toLower() == "deleted")
+        return QMailFolderKey::status(QMailFolder::Trash);
+    if(folder.toLower() == "drafts")
+        return QMailFolderKey::status(QMailFolder::Drafts);
+    if(folder.toLower() == "sent")
+        return QMailFolderKey::status(QMailFolder::Sent);
+    if(folder.toLower() == "junk")
+        return QMailFolderKey::status(QMailFolder::Junk);
+    return QMailFolderKey::path(folder);
+}
+
 
 void ObexDBusInterface::notifyMessages(const QMailMessageIdList &ids, MAPEventType type)
 {
@@ -60,9 +85,9 @@ void ObexDBusInterface::notifyMessages(const QMailMessageIdList &ids, MAPEventTy
     foreach (qmi, ids) {
         QMailMessage qmm = _store->message(qmi);
         QVariantMap args;
-        args.insert("folder",_store->folder(qmm.parentFolderId()).path());
+        args.insert("folder",flag2path(_store->folder(qmm.parentFolderId())));
         if(qmm.previousParentFolderId().isValid())
-            args.insert("old_folder",_store->folder(qmm.previousParentFolderId()).path());
+            args.insert("old_folder",flag2path(_store->folder(qmm.previousParentFolderId())));
         if(type == NewMessage) {
             args.insert("datetime",qmm.date().toString());
             args.insert("subject", qmm.subject());
@@ -126,7 +151,7 @@ const QMailThreadIdList ObexDBusInterface::queryThreads(const QString &account, 
         mtk = QMailThreadKey::parentAccountId(mal);
     }
     if(!folder.isEmpty()) {
-        QMailFolderKey mfk = QMailFolderKey::path(folder);
+        QMailFolderKey mfk = path2key(folder);
         if(!mal.isEmpty())
             mfk &= QMailFolderKey::parentAccountId(mal);
         QMailFolderIdList fil = _store->queryFolders(mfk);
@@ -178,7 +203,7 @@ const QVariantList ObexDBusInterface::listFolders(const QString &account, const 
     QVariantList ret;
     QMailFolderKey mfk;
     QMailFolderId mfi;
-    QMailFolderIdList fil = _store->queryFolders(QMailFolderKey::path(folder));
+    QMailFolderIdList fil = _store->queryFolders(path2key(folder));
     if(!folder.isEmpty() && fil.isEmpty()) {
         qDebug() << "No such folder found: " << folder;
         return ret;
@@ -201,9 +226,9 @@ const QVariantList ObexDBusInterface::listFolders(const QString &account, const 
         foreach (mfi, fil) {
             QMailFolder qmf = _store->folder(mfi);
             QVariantMap item;
-            item.insert("path",qmf.path());
-            item.insert("name",qmf.displayName());
-            item.insert("count", qmf.serverCount());
+            item.insert("path", flag2path(qmf));
+            item.insert("name", qmf.displayName());
+            item.insert("count",qmf.serverCount());
             item.insert("unread",qmf.serverUnreadCount());
             item.insert("account",_store->account(qmf.parentAccountId()).name());
             ret.append(item);
@@ -243,9 +268,7 @@ const QMailMessageKey ObexDBusInterface::prepareMessagesFilter(const QString &ac
     } else
         mal = _store->queryAccounts();
     mfk = QMailFolderKey::parentAccountId(mal);
-    fil = _store->queryFolders(mfk & QMailFolderKey::path(folder));
-    if(fil.isEmpty() && folder.toLower() == "deleted")
-        fil = _store->queryFolders(mfk & QMailFolderKey::path("trash"));
+    fil = _store->queryFolders(mfk & path2key(folder));
     if(fil.isEmpty()) {
         if(folder.toLower() == "outbox") {
             mmk = QMailMessageKey::parentAccountId(mal) & QMailMessageKey::status(QMailMessage::Outbox);
@@ -426,7 +449,7 @@ const QVariantMap ObexDBusInterface::getMessage(qint64 id, quint32 flags) const
     ret.insert("outbox",(bool)(qmm.status() & QMailMessage::Outbox));
     ret.insert("priority",(bool)(qmm.status() & QMailMessage::HighPriority));
     ret.insert("thread",qmm.parentThreadId().toULongLong());
-    ret.insert("folder",qmf.path());
+    ret.insert("folder",flag2path(qmf));
     ret.insert("account",qma.name());
     ret.insert("length", qmm.body().length());
     ret.insert("body",qmm.body().data(QMailMessageBody::Decoded));
@@ -476,7 +499,7 @@ qint64 ObexDBusInterface::putMessage(const QVariantMap data, quint32 flags)
     qmm->setParentAccountId(mal.at(0));
     qmm->setFrom(QMailAddress(data.value("from",_store->account(mal.at(0)).fromAddress().toString()).toString()));
     qmm->setTo(QMailAddress(data.value("to",qmm->from().toString()).toString()));
-    fil = _store->queryFolders(QMailFolderKey::path(data.value("folder","outbox").toString()) & QMailFolderKey::parentAccountId(mal.at(0)));
+    fil = _store->queryFolders(path2key(data.value("folder","outbox").toString()) & QMailFolderKey::parentAccountId(mal.at(0)));
     if(fil.isEmpty()) {
         fid = _store->account(mal.at(0)).standardFolder(QMailFolder::OutboxFolder);
         if(!fid.isValid())
@@ -571,7 +594,7 @@ int ObexDBusInterface::messageUpdate(const QString &account, const QString &fold
         QMailRetrievalAction *sync;
         QMailFolderIdList fil;
         if(!folder.isEmpty()) {
-            fil = _store->queryFolders(QMailFolderKey::parentAccountId(mai) & QMailFolderKey::path(folder));
+            fil = _store->queryFolders(QMailFolderKey::parentAccountId(mai) & path2key(folder));
             if(fil.isEmpty()) {
                 qDebug() << "No folder " << folder << " found for account " << account;
                 continue;
