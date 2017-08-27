@@ -62,6 +62,7 @@ public:
 public slots:
     Q_SCRIPTABLE const QVariantList listAccounts() const;
     Q_SCRIPTABLE const QVariantList listFolders(const QString &account, const QString &folder, quint16 max, quint16 offset) const;
+    Q_SCRIPTABLE const QVariantList listThreads(const QString &account, const QString &folder, quint16 max, quint16 offset) const;
     Q_SCRIPTABLE const QList<qint64> listMessages(const QString &account, const QString &folder, quint16 max, quint16 offset, const QVariantMap &filter) const;
 
     Q_SCRIPTABLE const QVariantMap getMetadata(qint64, quint32 mask) const;
@@ -69,7 +70,7 @@ public slots:
     Q_SCRIPTABLE qint64 putMessage(const QVariantMap data, quint32 flags);
     Q_SCRIPTABLE int setMessage(qint64 id, quint8 indicator, bool value);
 
-    Q_SCRIPTABLE int messageUpdate(const QString &account, const QString &folder);
+    Q_SCRIPTABLE int messageUpdate(const QString &account, const QString &folder, int min);
 
 signals:
     Q_SCRIPTABLE void mapEventReport(quint8 type, qint64 id, const QString &msg_type, const QVariantMap &kvargs) const;
@@ -86,6 +87,9 @@ private slots:
 
 private:
     const QMailMessageKey prepareMessagesFilter(const QString &account, const QString &folder, const QVariantMap &filter) const;
+    const QMailThreadIdList queryThreads(const QString &account, const QString &folder, quint16 max, quint16 offset) const;
+    const QVariantMap buildConversation(const QMailThreadId &mti) const;
+
     QMailStore *_store;
     QList<QMailMessage*> _queue;
 };

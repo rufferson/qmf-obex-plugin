@@ -116,14 +116,73 @@ void ObexDBusInterface::messagesRemoved(const QMailMessageIdList &ids)
     notifyMessages(ids,MessageDeleted);
 }
 
+const QMailThreadIdList ObexDBusInterface::queryThreads(const QString &account, const QString &folder, quint16 max, quint16 offset) const
+{
+    QMailThreadKey mtk;
+    QMailAccountIdList mal;
+
+    if(!account.isEmpty()) {
+        mal = _store->queryAccounts(QMailAccountKey::name(account));
+        mtk = QMailThreadKey::parentAccountId(mal);
+    }
+    if(!folder.isEmpty()) {
+        QMailFolderKey mfk = QMailFolderKey::path(folder);
+        if(!mal.isEmpty())
+            mfk &= QMailFolderKey::parentAccountId(mal);
+        QMailFolderIdList fil = _store->queryFolders(mfk);
+        mtk &= QMailThreadKey::includes(_store->queryMessages(QMailMessageKey::parentFolderId(fil)));
+    }
+    if(max == 0)
+        return QMailThreadIdList() << QMailThreadId(_store->countThreads(mtk));
+    return _store->queryThreads(mtk, QMailThreadSortKey::lastDate(Qt::DescendingOrder), max, offset);
+}
+
+const QVariantMap ObexDBusInterface::buildConversation(const QMailThreadId &mti) const
+{
+    QVariantMap item;
+    QVariantList users;
+    QMailThread qmt = _store->thread(mti);
+    item.insert("id",qmt.id().toULongLong());
+    item.insert("name",qmt.subject());
+    item.insert("last_activity",qmt.lastDate().toUTC().toString(Qt::ISODate).remove(QChar('-')).remove(QChar(':')));
+    item.insert("read_status",QString(qmt.unreadCount()?"no":"yes"));
+    item.insert("summary",qmt.preview().left(256));
+    foreach (QMailAddress add, qmt.senders()) {
+        QVariantMap user;
+        user.insert("uci",add.address());
+        user.insert("display_name", add.name());
+        users.append(user);
+    }
+    item.insert("participants", users);
+    item.insert("account",_store->account(qmt.parentAccountId()).name());
+    return item;
+}
+
+const QVariantList ObexDBusInterface::listThreads(const QString &account, const QString &folder, quint16 max, quint16 offset) const
+{
+    QVariantList ret;
+    QMailThreadIdList mtl = queryThreads(account, folder, max, offset);
+
+    if(max == 0)
+        return ret << QVariant::fromValue((int)mtl.first().toULongLong());
+    foreach (QMailThreadId mti, mtl) {
+        QVariantMap item = buildConversation(mti);
+        ret.append(item);
+    }
+
+    return ret;
+}
+
 const QVariantList ObexDBusInterface::listFolders(const QString &account, const QString &folder, quint16 max, quint16 offset) const
 {
     QVariantList ret;
     QMailFolderKey mfk;
     QMailFolderId mfi;
     QMailFolderIdList fil = _store->queryFolders(QMailFolderKey::path(folder));
-    if(!folder.isEmpty() && fil.isEmpty())
+    if(!folder.isEmpty() && fil.isEmpty()) {
+        qDebug() << "No such folder found: " << folder;
         return ret;
+    }
     mfk = QMailFolderKey::parentFolderId( folder.isEmpty() ? QMailFolderId(0) : fil.at(0));
     if(!account.isEmpty()) {
         QMailAccountIdList mal = _store->queryAccounts(QMailAccountKey::name(account, QMailDataComparator::Includes));
@@ -214,6 +273,12 @@ const QMailMessageKey ObexDBusInterface::prepareMessagesFilter(const QString &ac
             mmk &= QMailMessageKey::sender(filter.value("from").toString(),QMailDataComparator::Includes);
         if(!filter.value("rcpt").toString().isEmpty())
             mmk &= QMailMessageKey::recipients(filter.value("rcpt").toString(),QMailDataComparator::Includes);
+        if(filter.contains("thread_id"))
+            mmk &= QMailMessageKey::parentThreadId(QMailThreadId(filter.value("thread_id").toLongLong()));
+        else if(!filter.value("thread").toString().isEmpty()) {
+            mmk &= QMailMessageKey::subject(filter.value("thread").toString(),QMailDataComparator::Includes);
+        }
+
     }
     return mmk;
 }
@@ -496,11 +561,12 @@ int ObexDBusInterface::setMessage(qint64 id, quint8 indicator, bool value)
     return ret;
 }
 
-int ObexDBusInterface::messageUpdate(const QString &account, const QString &folder)
+int ObexDBusInterface::messageUpdate(const QString &account, const QString &folder, int min)
 {
     QMailAccountKey mak = account.isEmpty() ? QMailAccountKey() : QMailAccountKey::name(account);
     QMailAccountIdList mal = _store->queryAccounts(mak);
     QMailAccountId mai;
+    int ret = -1;
     foreach (mai, mal) {
         QMailRetrievalAction *sync;
         QMailFolderIdList fil;
@@ -508,7 +574,7 @@ int ObexDBusInterface::messageUpdate(const QString &account, const QString &fold
             fil = _store->queryFolders(QMailFolderKey::parentAccountId(mai) & QMailFolderKey::path(folder));
             if(fil.isEmpty()) {
                 qDebug() << "No folder " << folder << " found for account " << account;
-                return -1;
+                continue;
             }
         }
         sync = new QMailRetrievalAction(this);
@@ -519,9 +585,13 @@ int ObexDBusInterface::messageUpdate(const QString &account, const QString &fold
             }
         });
         qDebug() << "Requesting update for folder " << fil << " at " << mai.toULongLong();
-        sync->retrieveNewMessages(mai, fil);
+        if(min<0)
+            sync->retrieveNewMessages(mai, fil);
+        else
+            sync->retrieveMessageLists(mai, fil, min);
+        ret = 0;
     }
-    return 0;
+    return ret;
 }
 
 const QVariantList ObexDBusInterface::listAccounts() const
