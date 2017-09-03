@@ -584,7 +584,7 @@ int ObexDBusInterface::setMessage(qint64 id, quint8 indicator, bool value)
     return ret;
 }
 
-int ObexDBusInterface::messageUpdate(const QString &account, const QString &folder, int min)
+int ObexDBusInterface::updateFolder(const QString &account, const QString &folder, int min)
 {
     QMailAccountKey mak = account.isEmpty() ? QMailAccountKey() : QMailAccountKey::name(account);
     QMailAccountIdList mal = _store->queryAccounts(mak);

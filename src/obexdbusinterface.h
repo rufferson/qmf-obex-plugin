@@ -70,7 +70,7 @@ public slots:
     Q_SCRIPTABLE qint64 putMessage(const QVariantMap data, quint32 flags);
     Q_SCRIPTABLE int setMessage(qint64 id, quint8 indicator, bool value);
 
-    Q_SCRIPTABLE int messageUpdate(const QString &account, const QString &folder, int min);
+    Q_SCRIPTABLE int updateFolder(const QString &account, const QString &folder, int min);
 
 signals:
     Q_SCRIPTABLE void mapEventReport(quint8 type, qint64 id, const QString &msg_type, const QVariantMap &kvargs) const;
